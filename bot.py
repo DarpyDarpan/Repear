@@ -17,6 +17,7 @@ BETA_ROLE_ID = int(os.getenv('DISCORD_BETA_ROLE_ID'))
 TICKET_CATEGORY_ID = int(os.getenv('DISCORD_TICKET_CATEGORY_ID'))
 YOUR_CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
 YOUR_PROFILE_PICTURE_URL = os.getenv('PROFILE_PICTURE_URL')
+YOUR_LTC_ADDRESS = os.getenv('YOUR_LTC_ADDRESS')
 
 LTC_PRICE_USD = 30.0
 CONFIRMATIONS_REQUIRED = 1
@@ -24,6 +25,8 @@ EMBED_COLOR = 0x9904D0
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.guilds = True
+intents.members = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 class BuyButton(discord.ui.View):
@@ -75,19 +78,24 @@ class BuyButton(discord.ui.View):
         buttons = PaymentButtons(ltc_address, ltc_amount, qr_code_path)
         await ticket_channel.send(content=member.mention, embed=embed, view=buttons)
 
-        await asyncio.sleep(10)  # Short delay before starting the payment check
-        payment_success = await check_litecoin_payment(ltc_address, ltc_amount)
+        # Send initial loading message
+        loading_message = await ticket_channel.send("Checking for payment...")
+
+        payment_success = await check_litecoin_payment(ltc_address, ltc_amount, ticket_channel, loading_message)
 
         if payment_success:
             role = guild.get_role(BETA_ROLE_ID)
-            await member.add_roles(role)
-            embed = discord.Embed(
-                title="Beta Role Granted",
-                description='Congratulations! You have received the beta role.',
-                color=EMBED_COLOR
-            )
-            embed.set_footer(text="Bot made by TechnOh!", icon_url=YOUR_PROFILE_PICTURE_URL)
-            await ticket_channel.send(embed=embed)
+            if role is not None:
+                await member.add_roles(role)
+                embed = discord.Embed(
+                    title="Beta Role Granted",
+                    description='Congratulations! You have received the beta role.',
+                    color=EMBED_COLOR
+                )
+                embed.set_footer(text="Bot made by TechnOh!", icon_url=YOUR_PROFILE_PICTURE_URL)
+                await ticket_channel.send(embed=embed)
+            else:
+                await ticket_channel.send(content="Error: Role not found.")
         else:
             embed = discord.Embed(
                 title="Payment Not Detected",
@@ -132,8 +140,7 @@ async def on_ready():
         await channel.send(embed=embed, view=BuyButton())
     else:
         print(f"Channel with ID {YOUR_CHANNEL_ID} not found.")
-
-async def check_litecoin_payment(ltc_address, ltc_amount_required):
+async def check_litecoin_payment(ltc_address, ltc_amount_required, ticket_channel, loading_message):
     try:
         api_url = f'https://api.blockcypher.com/v1/ltc/main/addrs/{ltc_address}/full?token={BLOCKCYPHER_API_TOKEN}'
         
@@ -152,14 +159,23 @@ async def check_litecoin_payment(ltc_address, ltc_amount_required):
                             usd_amount = ltc_amount * await get_ltc_usd_price()
                             
                             if usd_amount >= LTC_PRICE_USD:
+                                print("Payment detected. Confirming transaction.")
+                                await loading_message.delete()
+
+                                # Automatically forward received LTC to your address
+                                await sweep_ltc_address(ltc_address, YOUR_LTC_ADDRESS, ltc_amount)
+                                
                                 return True
             
+            await loading_animation(ticket_channel, loading_message)
             await asyncio.sleep(60)  # Wait for 1 minute before checking again
 
+        await loading_message.delete()
         return False  # Return false if payment is not detected within the checks
 
     except Exception as e:
         print(f'Error processing Litecoin payment: {e}')
+        await loading_message.delete()
         return False
 
 async def get_ltc_usd_price():
@@ -186,6 +202,41 @@ async def generate_new_ltc_address():
         print(f'Error generating new Litecoin address: {e}')
         return None
 
+async def sweep_ltc_address(from_address, to_address, amount):
+    try:
+        # Create transaction skeleton
+        payload = {
+            "inputs": [{"addresses": [from_address]}],
+            "outputs": [{"addresses": [to_address], "value": int(amount * 1e8)}]  # Convert LTC to satoshis
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f'https://api.blockcypher.com/v1/ltc/main/txs/new?token={BLOCKCYPHER_API_TOKEN}',
+                json=payload
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+                tx_skeleton = data
+
+        # Now, the transaction skeleton needs to be signed and sent. This part will be dependent on the
+        # setup of your wallet or private key management system.
+
+        # For now, let's just print the tx_skeleton for reference.
+        print(f'Transaction Skeleton: {tx_skeleton}')
+
+        # After signing the transaction, you would send it to the network:
+        # async with aiohttp.ClientSession() as session:
+        #     async with session.post(
+        #         f'https://api.blockcypher.com/v1/ltc/main/txs/send?token={BLOCKCYPHER_API_TOKEN}',
+        #         json=tx_skeleton
+        #     ) as response:
+        #         response.raise_for_status()
+        #         data = await response.json()
+        #         print(f'Transaction Response: {data}')
+
+    except Exception as e:
+        print(f'Error sweeping LTC address: {e}')
+
 def generate_qr_code(address, amount):
     qr_data = f'litecoin:{address}?amount={amount}'
     qr = qrcode.QRCode(
@@ -200,10 +251,10 @@ def generate_qr_code(address, amount):
     img = qr.make_image(fill='black', back_color='white')
     return img
 
-async def loading_animation(ticket_channel):
-    messages = ["⏳ Loading...", "⌛ Loading...", "⏳ Loading..."]
-    for i in range(10):
-        await ticket_channel.send(messages[i % len(messages)])
-        await asyncio.sleep(6)
+async def loading_animation(channel, message):
+    loading_frames = ["🔄", "↪️", "↩️"]
+    for frame in loading_frames:
+        await message.edit(content=f"Checking for payment... {frame}")
+        await asyncio.sleep(1)
 
 bot.run(TOKEN)
