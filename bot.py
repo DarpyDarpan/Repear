@@ -31,7 +31,7 @@ class BuyButton(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Buy", style=discord.ButtonStyle.primary, custom_id="buy_button")
-    async def buy_button_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
+    async def buy_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
 
         guild = interaction.guild
@@ -46,7 +46,7 @@ class BuyButton(discord.ui.View):
         ticket_channel = await guild.create_text_channel(name=f'ticket-{member.name}', overwrites=overwrites, category=category)
 
         # Send payment details and QR code in the ticket channel
-        ltc_amount = LTC_PRICE_USD / get_ltc_usd_price()
+        ltc_amount = LTC_PRICE_USD / await get_ltc_usd_price()
         qr_code_image = generate_qr_code(BLOCKCYPHER_LTC_ADDRESS, ltc_amount)
         qr_code_path = 'ltc_qr.png'
         qr_code_image.save(qr_code_path)
@@ -112,7 +112,7 @@ async def check_litecoin_payment():
         api_url = f'https://api.blockcypher.com/v1/ltc/main/addrs/{BLOCKCYPHER_LTC_ADDRESS}/full?token={BLOCKCYPHER_API_TOKEN}'
         
         for _ in range(10):  # Check for payment 10 times with a 1-minute interval
-            response = requests.get(api_url)
+            response = await bot.loop.run_in_executor(None, requests.get, api_url)
             response.raise_for_status()
             data = response.json()
 
@@ -121,7 +121,7 @@ async def check_litecoin_payment():
                     for output in tx['outputs']:
                         if output['addresses'] == [BLOCKCYPHER_LTC_ADDRESS] and output['value'] > 0:
                             ltc_amount = output['value'] / 1e8  # Convert from satoshis to LTC
-                            usd_amount = ltc_amount * get_ltc_usd_price()
+                            usd_amount = ltc_amount * await get_ltc_usd_price()
                             
                             if usd_amount >= LTC_PRICE_USD:
                                 return True
@@ -134,9 +134,9 @@ async def check_litecoin_payment():
         print(f'Error processing Litecoin payment: {e}')
         return False
 
-def get_ltc_usd_price():
+async def get_ltc_usd_price():
     try:
-        response = requests.get('https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd')
+        response = await bot.loop.run_in_executor(None, requests.get, 'https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd')
         response.raise_for_status()
         data = response.json()
         return data['litecoin']['usd']
