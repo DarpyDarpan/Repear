@@ -29,7 +29,6 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 class BuyButton(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(discord.ui.Button(label="Buy", style=discord.ButtonStyle.primary, custom_id="buy_button"))
 
     @discord.ui.button(label="Buy", style=discord.ButtonStyle.primary, custom_id="buy_button")
     async def buy_button_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -49,7 +48,8 @@ class BuyButton(discord.ui.View):
         # Send payment details and QR code in the ticket channel
         ltc_amount = LTC_PRICE_USD / get_ltc_usd_price()
         qr_code_image = generate_qr_code(BLOCKCYPHER_LTC_ADDRESS, ltc_amount)
-        qr_code_image.save('ltc_qr.png')
+        qr_code_path = 'ltc_qr.png'
+        qr_code_image.save(qr_code_path)
 
         embed = discord.Embed(
             title="Purchase Beta Role",
@@ -62,7 +62,7 @@ class BuyButton(discord.ui.View):
         )
         embed.set_footer(text="Bot made by TechnOh!", icon_url=YOUR_PROFILE_PICTURE_URL)
         await ticket_channel.send(embed=embed)
-        await ticket_channel.send(file=discord.File('ltc_qr.png'))
+        await ticket_channel.send(file=discord.File(qr_code_path))
 
         await asyncio.sleep(10)  # Short delay before starting the payment check
         payment_success = await check_litecoin_payment()
@@ -86,25 +86,32 @@ class BuyButton(discord.ui.View):
             embed.set_footer(text="Bot made by TechnOh!", icon_url=YOUR_PROFILE_PICTURE_URL)
             await ticket_channel.send(embed=embed)
 
+        # Cleanup the QR code image file
+        if os.path.exists(qr_code_path):
+            os.remove(qr_code_path)
+
 @bot.event
 async def on_ready():
     print(f'We have logged in as {bot.user}')
     
     # Send the embed message with the buy button in a specific channel
     channel = bot.get_channel(YOUR_CHANNEL_ID)
-    embed = discord.Embed(
-        title="Buy Beta Role",
-        description="Click the button below to purchase the beta role using Litecoin.",
-        color=EMBED_COLOR
-    )
-    embed.set_footer(text="Bot made by TechnOh!", icon_url=YOUR_PROFILE_PICTURE_URL)
-    await channel.send(embed=embed, view=BuyButton())
+    if channel:
+        embed = discord.Embed(
+            title="Buy Beta Role",
+            description="Click the button below to purchase the beta role using Litecoin.",
+            color=EMBED_COLOR
+        )
+        embed.set_footer(text="Bot made by TechnOh!", icon_url=YOUR_PROFILE_PICTURE_URL)
+        await channel.send(embed=embed, view=BuyButton())
+    else:
+        print(f"Channel with ID {YOUR_CHANNEL_ID} not found.")
 
 async def check_litecoin_payment():
     try:
         api_url = f'https://api.blockcypher.com/v1/ltc/main/addrs/{BLOCKCYPHER_LTC_ADDRESS}/full?token={BLOCKCYPHER_API_TOKEN}'
         
-        while True:
+        for _ in range(10):  # Check for payment 10 times with a 1-minute interval
             response = requests.get(api_url)
             response.raise_for_status()
             data = response.json()
@@ -120,6 +127,8 @@ async def check_litecoin_payment():
                                 return True
             
             await asyncio.sleep(60)  # Wait for 1 minute before checking again
+
+        return False  # Return false if payment is not detected within the checks
 
     except Exception as e:
         print(f'Error processing Litecoin payment: {e}')
