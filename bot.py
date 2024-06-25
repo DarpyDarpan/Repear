@@ -5,13 +5,13 @@ import qrcode
 import asyncio
 import os
 from dotenv import load_dotenv
+import aiohttp
 
 # Load environment variables from .env file
 load_dotenv()
 
 TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 BLOCKCYPHER_API_TOKEN = os.getenv('BLOCKCYPHER_API_TOKEN')
-BLOCKCYPHER_LTC_ADDRESS = os.getenv('BLOCKCYPHER_LTC_ADDRESS')
 SERVER_ID = int(os.getenv('DISCORD_SERVER_ID'))
 BETA_ROLE_ID = int(os.getenv('DISCORD_BETA_ROLE_ID'))
 TICKET_CATEGORY_ID = int(os.getenv('DISCORD_TICKET_CATEGORY_ID'))
@@ -45,9 +45,12 @@ class BuyButton(discord.ui.View):
         category = guild.get_channel(TICKET_CATEGORY_ID)
         ticket_channel = await guild.create_text_channel(name=f'ticket-{member.name}', overwrites=overwrites, category=category)
 
-        # Send payment details and QR code in the ticket channel
+        # Generate a new Litecoin address for this transaction
+        ltc_address = await generate_new_ltc_address()
+
+        # Calculate the LTC amount
         ltc_amount = LTC_PRICE_USD / await get_ltc_usd_price()
-        qr_code_image = generate_qr_code(BLOCKCYPHER_LTC_ADDRESS, ltc_amount)
+        qr_code_image = generate_qr_code(ltc_address, ltc_amount)
         qr_code_path = 'ltc_qr.png'
         qr_code_image.save(qr_code_path)
 
@@ -55,17 +58,17 @@ class BuyButton(discord.ui.View):
             title="Purchase Beta Role",
             description=(
                 f'To purchase the beta role, please send the equivalent of ${LTC_PRICE_USD:.2f} in Litecoin '
-                f'to the following address: `{BLOCKCYPHER_LTC_ADDRESS}`. Scan the QR code for payment details. '
+                f'to the following address: `{ltc_address}`. Scan the QR code for payment details. '
                 f'Once the payment is confirmed, you will receive the role.'
             ),
             color=EMBED_COLOR
         )
         embed.set_footer(text="Bot made by TechnOh!", icon_url=YOUR_PROFILE_PICTURE_URL)
-        await ticket_channel.send(embed=embed)
+        await ticket_channel.send(content=member.mention, embed=embed)
         await ticket_channel.send(file=discord.File(qr_code_path))
 
         await asyncio.sleep(10)  # Short delay before starting the payment check
-        payment_success = await check_litecoin_payment()
+        payment_success = await check_litecoin_payment(ltc_address, ltc_amount)
 
         if payment_success:
             role = guild.get_role(BETA_ROLE_ID)
@@ -107,9 +110,9 @@ async def on_ready():
     else:
         print(f"Channel with ID {YOUR_CHANNEL_ID} not found.")
 
-async def check_litecoin_payment():
+async def check_litecoin_payment(ltc_address, ltc_amount_required):
     try:
-        api_url = f'https://api.blockcypher.com/v1/ltc/main/addrs/{BLOCKCYPHER_LTC_ADDRESS}/full?token={BLOCKCYPHER_API_TOKEN}'
+        api_url = f'https://api.blockcypher.com/v1/ltc/main/addrs/{ltc_address}/full?token={BLOCKCYPHER_API_TOKEN}'
         
         for _ in range(10):  # Check for payment 10 times with a 1-minute interval
             response = await bot.loop.run_in_executor(None, requests.get, api_url)
@@ -119,7 +122,7 @@ async def check_litecoin_payment():
             for tx in data['txs']:
                 if tx['confirmations'] >= CONFIRMATIONS_REQUIRED:
                     for output in tx['outputs']:
-                        if output['addresses'] == [BLOCKCYPHER_LTC_ADDRESS] and output['value'] > 0:
+                        if output['addresses'] == [ltc_address] and output['value'] > 0:
                             ltc_amount = output['value'] / 1e8  # Convert from satoshis to LTC
                             usd_amount = ltc_amount * await get_ltc_usd_price()
                             
@@ -136,13 +139,27 @@ async def check_litecoin_payment():
 
 async def get_ltc_usd_price():
     try:
-        response = await bot.loop.run_in_executor(None, requests.get, 'https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd')
-        response.raise_for_status()
-        data = response.json()
-        return data['litecoin']['usd']
+        async with aiohttp.ClientSession() as session:
+            async with session.get('https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd') as response:
+                response.raise_for_status()
+                data = await response.json()
+                return data['litecoin']['usd']
     except Exception as e:
         print(f'Error fetching Litecoin price: {e}')
         return 0
+
+async def generate_new_ltc_address():
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f'https://api.blockcypher.com/v1/ltc/main/addrs?token={BLOCKCYPHER_API_TOKEN}'
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+                return data['address']
+    except Exception as e:
+        print(f'Error generating new Litecoin address: {e}')
+        return None
 
 def generate_qr_code(address, amount):
     qr_data = f'litecoin:{address}?amount={amount}'
@@ -157,5 +174,11 @@ def generate_qr_code(address, amount):
 
     img = qr.make_image(fill='black', back_color='white')
     return img
+
+async def loading_animation(ticket_channel):
+    messages = ["⏳ Loading...", "⌛ Loading...", "⏳ Loading..."]
+    for i in range(10):
+        await ticket_channel.send(messages[i % len(messages)])
+        await asyncio.sleep(6)
 
 bot.run(TOKEN)
