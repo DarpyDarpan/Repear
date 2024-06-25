@@ -47,9 +47,17 @@ class BuyButton(discord.ui.View):
 
         # Generate a new Litecoin address for this transaction
         ltc_address = await generate_new_ltc_address()
+        if not ltc_address:
+            await ticket_channel.send(content="Error generating Litecoin address. Please try again later.")
+            return
 
         # Calculate the LTC amount
-        ltc_amount = LTC_PRICE_USD / await get_ltc_usd_price()
+        ltc_price_usd = await get_ltc_usd_price()
+        if ltc_price_usd == 0:
+            await ticket_channel.send(content="Error fetching Litecoin price. Please try again later.")
+            return
+
+        ltc_amount = LTC_PRICE_USD / ltc_price_usd
         qr_code_image = generate_qr_code(ltc_address, ltc_amount)
         qr_code_path = 'ltc_qr.png'
         qr_code_image.save(qr_code_path)
@@ -134,10 +142,12 @@ async def check_litecoin_payment(ltc_address, ltc_amount_required):
             response.raise_for_status()
             data = response.json()
 
-            for tx in data['txs']:
-                if tx['confirmations'] >= CONFIRMATIONS_REQUIRED:
-                    for output in tx['outputs']:
-                        if output['addresses'] == [ltc_address] and output['value'] > 0:
+            print(f'API Response: {data}')  # Debugging line to check API response structure
+
+            for tx in data.get('txs', []):
+                if tx.get('confirmations', 0) >= CONFIRMATIONS_REQUIRED:
+                    for output in tx.get('outputs', []):
+                        if ltc_address in output.get('addresses', []) and output.get('value', 0) > 0:
                             ltc_amount = output['value'] / 1e8  # Convert from satoshis to LTC
                             usd_amount = ltc_amount * await get_ltc_usd_price()
                             
