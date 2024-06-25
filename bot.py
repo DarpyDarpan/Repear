@@ -18,7 +18,7 @@ TICKET_CATEGORY_ID = int(os.getenv('DISCORD_TICKET_CATEGORY_ID'))
 YOUR_CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
 YOUR_PROFILE_PICTURE_URL = os.getenv('PROFILE_PICTURE_URL')
 
-LTC_PRICE_USD = 20.0
+LTC_PRICE_USD = 30.0
 CONFIRMATIONS_REQUIRED = 1
 EMBED_COLOR = 0x9904D0
 
@@ -56,16 +56,16 @@ class BuyButton(discord.ui.View):
 
         embed = discord.Embed(
             title="Purchase Beta Role",
-            description=(
-                f'To purchase the beta role, please send the equivalent of ${LTC_PRICE_USD:.2f} in Litecoin '
-                f'to the following address: `{ltc_address}`. Scan the QR code for payment details. '
-                f'Once the payment is confirmed, you will receive the role.'
-            ),
+            description="To purchase the beta role, please send the required amount in Litecoin to the provided address. Use the buttons below for easy access.",
             color=EMBED_COLOR
         )
+        embed.add_field(name="Litecoin Address", value=f'`{ltc_address}`', inline=False)
+        embed.add_field(name="LTC Amount", value=f'`{ltc_amount:.8f}`', inline=False)
+        embed.add_field(name="USD Amount", value=f'`${LTC_PRICE_USD:.2f}`', inline=False)
         embed.set_footer(text="Bot made by TechnOh!", icon_url=YOUR_PROFILE_PICTURE_URL)
-        await ticket_channel.send(content=member.mention, embed=embed)
-        await ticket_channel.send(file=discord.File(qr_code_path))
+        
+        buttons = PaymentButtons(ltc_address, ltc_amount, qr_code_path)
+        await ticket_channel.send(content=member.mention, embed=embed, view=buttons)
 
         await asyncio.sleep(10)  # Short delay before starting the payment check
         payment_success = await check_litecoin_payment(ltc_address, ltc_amount)
@@ -92,6 +92,21 @@ class BuyButton(discord.ui.View):
         # Cleanup the QR code image file
         if os.path.exists(qr_code_path):
             os.remove(qr_code_path)
+
+class PaymentButtons(discord.ui.View):
+    def __init__(self, ltc_address, ltc_amount, qr_code_path):
+        super().__init__()
+        self.ltc_address = ltc_address
+        self.ltc_amount = ltc_amount
+        self.qr_code_path = qr_code_path
+
+    @discord.ui.button(label="Copy Address & Amount", style=discord.ButtonStyle.secondary)
+    async def copy_details_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(f"`{self.ltc_address}`\n`{self.ltc_amount:.8f}`", ephemeral=True)
+
+    @discord.ui.button(label="Get QR Code", style=discord.ButtonStyle.secondary)
+    async def get_qr_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(file=discord.File(self.qr_code_path), ephemeral=True)
 
 @bot.event
 async def on_ready():
