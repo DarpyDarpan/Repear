@@ -23,7 +23,7 @@ YOUR_PROFILE_PICTURE_URL = os.getenv('PROFILE_PICTURE_URL')
 YOUR_LTC_ADDRESS = os.getenv('YOUR_LTC_ADDRESS')
 PRIVATE_KEY = os.getenv('PRIVATE_KEY')
 
-LTC_PRICE_USD = 0.1
+LTC_PRICE_USD = 30.0
 CONFIRMATIONS_REQUIRED = 1
 EMBED_COLOR = 0x9904D0
 
@@ -34,17 +34,6 @@ intents.members = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 ANIMATED_EMOJI = '<a:animated_emoji:123456789012345678>'  # Replace with your actual emoji ID
-
-class PaymentButtons(discord.ui.View):
-    def __init__(self, ltc_address, ltc_amount, qr_code_path):
-        super().__init__(timeout=None)
-        self.ltc_address = ltc_address
-        self.ltc_amount = ltc_amount
-        self.qr_code_path = qr_code_path
-
-    @discord.ui.button(label="Pay Now", style=discord.ButtonStyle.primary, custom_id="pay_button")
-    async def pay_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(content=f"Please send {self.ltc_amount:.8f} LTC to {self.ltc_address}.", ephemeral=True)
 
 class BuyButton(discord.ui.View):
     def __init__(self, ltc_address, ltc_amount):
@@ -233,8 +222,48 @@ def generate_qr_code(address, amount):
     qr.make(fit=True)
     return qr.make_image(fill_color="black", back_color="white")
 
+async def send_buy_message():
+    channel = bot.get_channel(YOUR_CHANNEL_ID)
+    if channel is None:
+        logging.error(f"Channel with ID {YOUR_CHANNEL_ID} not found!")
+        return
+    
+    ltc_address, private_key = await generate_new_ltc_address()
+    if not ltc_address:
+        await channel.send(content="Error generating Litecoin address. Please try again later.")
+        return
+
+    save_private_key(ltc_address, private_key)
+
+    ltc_price_usd = await get_ltc_usd_price()
+    if ltc_price_usd == 0:
+        await channel.send(content="Error fetching Litecoin price. Please try again later.")
+        return
+
+    ltc_amount = LTC_PRICE_USD / ltc_price_usd
+    qr_code_image = generate_qr_code(ltc_address, ltc_amount)
+    qr_code_path = 'ltc_qr.png'
+    qr_code_image.save(qr_code_path)
+
+    embed = discord.Embed(
+        title="Purchase Beta Role",
+        description="To purchase the beta role, please send the required amount in Litecoin to the provided address. Use the buttons below for easy access.",
+        color=EMBED_COLOR
+    )
+    embed.add_field(name="Litecoin Address", value=f'`{ltc_address}`', inline=False)
+    embed.add_field(name="LTC Amount", value=f'`{ltc_amount:.8f}`', inline=False)
+    embed.add_field(name="USD Amount", value=f'`${LTC_PRICE_USD:.2f}`', inline=False)
+    embed.set_footer(text="Bot made by TechnOh!", icon_url=YOUR_PROFILE_PICTURE_URL)
+    
+    buttons = BuyButton(ltc_address, ltc_amount)
+    await channel.send(embed=embed, view=buttons)
+
+    if os.path.exists(qr_code_path):
+        os.remove(qr_code_path)
+
 @bot.event
 async def on_ready():
     logging.info(f'Logged in as {bot.user}!')
+    await send_buy_message()
 
 bot.run(TOKEN)
