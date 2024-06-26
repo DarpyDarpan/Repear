@@ -5,7 +5,6 @@ import requests
 import qrcode
 import os
 from dotenv import load_dotenv
-import json
 import logging
 import asyncio
 
@@ -37,6 +36,9 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 ANIMATED_EMOJI = '<a:animated_emoji:123456789012345678>'  # Replace with your actual emoji ID
 
 class BuyButton(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
     @discord.ui.button(label="Buy", style=discord.ButtonStyle.primary, custom_id="buy_button")
     async def buy_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
