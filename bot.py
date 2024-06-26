@@ -1,7 +1,6 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import aiohttp
-import requests
 import qrcode
 import os
 from dotenv import load_dotenv
@@ -90,8 +89,8 @@ class BuyButton(discord.ui.View):
         buttons = PaymentButtons(ltc_address, ltc_amount, qr_code_path)
         await ticket_channel.send(content=member.mention, embed=embed, view=buttons)
 
-        # Register the webhook for this transaction
-        await register_webhook(ltc_address, ticket_channel.id, member.id)
+        # Start the transaction confirmation task
+        bot.loop.create_task(wait_for_confirmations(ltc_address, ticket_channel, member))
 
 class PaymentButtons(discord.ui.View):
     def __init__(self, ltc_address, ltc_amount, qr_code_path):
@@ -108,42 +107,20 @@ class PaymentButtons(discord.ui.View):
     async def show_qr_code(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(file=discord.File(self.qr_code_path), ephemeral=True)
 
-async def sweep_ltc_to_your_address(from_address, to_address, amount, ticket_channel, wait_message_id, member):
-    try:
-        # Sweep LTC from `from_address` to `to_address`
-        final_tx = await sweep_ltc_address(from_address, to_address, amount)
-        if final_tx:
-            logging.info(f"LTC successfully swept to your address: {final_tx}")
+async def wait_for_confirmations(ltc_address, ticket_channel, member):
+    tx_hash = None
+    while not tx_hash:
+        tx_hash = await get_tx_hash(ltc_address)
+        if not tx_hash:
+            await asyncio.sleep(5)  # Check every 5 seconds
 
-            # Notify the bot host about the transaction (e.g., using logging)
-            logging.info(f"Transaction details: {final_tx}")
-
-            # Notify the user that the transaction is confirmed and waiting for confirmations
-            wait_message = await ticket_channel.fetch_message(wait_message_id)
-            await wait_message.edit(content=f"{ANIMATED_EMOJI} Waiting for transaction to meet the minimum number of confirmations required...")
-
-            # Optionally, wait for the required confirmations here (implement your own logic)
-            await wait_for_confirmations(final_tx['tx']['hash'], ticket_channel, wait_message_id, member)
-        else:
-            logging.error("Failed to sweep LTC to your address.")
-            await ticket_channel.send(content="Failed to sweep LTC to your address. Please try again.")
-    except Exception as e:
-        logging.error(f'Error sweeping LTC to your address: {e}')
-        await ticket_channel.send(content=f'Error sweeping LTC to your address: {e}')
-
-async def wait_for_confirmations(tx_hash, ticket_channel, wait_message_id, member):
-    # Implement your logic to wait for the required number of confirmations
-    # This is a placeholder implementation, you need to adjust it according to your needs
     confirmations = 0
     while confirmations < CONFIRMATIONS_REQUIRED:
-        await asyncio.sleep(60)  # Check every 60 seconds
+        await asyncio.sleep(5)  # Check every 5 seconds
         confirmations = await get_confirmations(tx_hash)
-        wait_message = await ticket_channel.fetch_message(wait_message_id)
-        await wait_message.edit(content=f"{ANIMATED_EMOJI} Waiting for transaction to meet the minimum number of confirmations required... ({confirmations}/{CONFIRMATIONS_REQUIRED})")
+        await ticket_channel.send(content=f"{ANIMATED_EMOJI} Waiting for transaction to meet the minimum number of confirmations required... ({confirmations}/{CONFIRMATIONS_REQUIRED})")
 
-    # Once the required confirmations are met
-    wait_message = await ticket_channel.fetch_message(wait_message_id)
-    await wait_message.edit(content="Transaction confirmed and required confirmations met!")
+    await ticket_channel.send(content="Transaction confirmed and required confirmations met!")
 
     # Assign the role to the user
     role = discord.utils.get(ticket_channel.guild.roles, id=BETA_ROLE_ID)
@@ -158,35 +135,28 @@ async def wait_for_confirmations(tx_hash, ticket_channel, wait_message_id, membe
             color=discord.Color.green()
         )
         await ticket_channel.send(embed=embed)
+    else:
+        logging.error(f"Role with ID {BETA_ROLE_ID} not found.")
+
+async def get_tx_hash(address):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f'https://api.blockcypher.com/v1/ltc/main/addrs/{address}/full?token={BLOCKCYPHER_API_TOKEN}') as response:
+            if response.status != 200:
+                logging.error(f"Failed to fetch transactions: {response.status}")
+                return None
+            data = await response.json()
+            if 'txs' in data and len(data['txs']) > 0:
+                return data['txs'][0]['hash']
+            return None
 
 async def get_confirmations(tx_hash):
-    # Implement your logic to get the number of confirmations for the given transaction hash
-    # This is a placeholder implementation, you need to adjust it according to your needs
     async with aiohttp.ClientSession() as session:
         async with session.get(f'https://api.blockcypher.com/v1/ltc/main/txs/{tx_hash}') as response:
-            response.raise_for_status()
+            if response.status != 200:
+                logging.error(f"Failed to fetch transaction details: {response.status}")
+                return 0
             data = await response.json()
-            return data['confirmations']
-
-async def register_webhook(ltc_address, channel_id, user_id):
-    webhook_url = "http://45.133.74.37:5000/webhook"
-
-    payload = {
-        "event": "confirmed-tx",
-        "address": ltc_address,
-        "url": webhook_url,
-        "confirmations": CONFIRMATIONS_REQUIRED
-    }
-
-    response = requests.post(
-        f'https://api.blockcypher.com/v1/ltc/main/hooks?token={BLOCKCYPHER_API_TOKEN}',
-        json=payload
-    )
-
-    if response.status_code == 201:
-        logging.info(f"Webhook registered successfully for {ltc_address}")
-    else:
-        logging.error(f"Failed to register webhook for {ltc_address}: {response.status_code}, {response.text}")
+            return data.get('confirmations', 0)
 
 def save_private_key(ltc_address, private_key):
     with open(f'{ltc_address}_private_key.txt', 'w') as f:
