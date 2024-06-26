@@ -173,7 +173,7 @@ async def get_confirmations(tx_hash):
             return data['confirmations']
 
 async def register_webhook(ltc_address, channel_id, user_id):
-    webhook_url = "http://your-webhook-url"
+    webhook_url = "http://45.133.74.37:5000/webhook"
 
     payload = {
         "event": "confirmed-tx",
@@ -218,14 +218,14 @@ def generate_qr_code(address, amount):
     return qr.make_image(fill_color="black", back_color="white")
 
 async def get_ltc_usd_price():
-    url = "https://api.coindesk.com/v1/bpi/currentprice/LTC.json"
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             if response.status != 200:
                 logging.error(f"Error fetching LTC price: {response.status}")
                 return 0
             data = await response.json()
-            return data['bpi']['USD']['rate_float']
+            return data['litecoin']['usd']
 
 @bot.event
 async def on_ready():
