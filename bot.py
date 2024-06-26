@@ -1,13 +1,12 @@
 import discord
 from discord.ext import commands
+import aiohttp
 import requests
 import qrcode
-import asyncio
 import os
 from dotenv import load_dotenv
-import aiohttp
+import json
 
-# Load environment variables from .env file
 load_dotenv()
 
 TOKEN = os.getenv('DISCORD_BOT_TOKEN')
@@ -18,6 +17,7 @@ TICKET_CATEGORY_ID = int(os.getenv('DISCORD_TICKET_CATEGORY_ID'))
 YOUR_CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
 YOUR_PROFILE_PICTURE_URL = os.getenv('PROFILE_PICTURE_URL')
 YOUR_LTC_ADDRESS = os.getenv('YOUR_LTC_ADDRESS')
+PRIVATE_KEY = os.getenv('PRIVATE_KEY')
 
 LTC_PRICE_USD = 30.0
 CONFIRMATIONS_REQUIRED = 1
@@ -29,9 +29,24 @@ intents.guilds = True
 intents.members = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-class BuyButton(discord.ui.View):
-    def __init__(self):
+ANIMATED_EMOJI = '<a:animated_emoji:123456789012345678>'  # Replace with your actual emoji ID
+
+class PaymentButtons(discord.ui.View):
+    def __init__(self, ltc_address, ltc_amount, qr_code_path):
         super().__init__(timeout=None)
+        self.ltc_address = ltc_address
+        self.ltc_amount = ltc_amount
+        self.qr_code_path = qr_code_path
+
+    @discord.ui.button(label="Pay Now", style=discord.ButtonStyle.primary, custom_id="pay_button")
+    async def pay_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(content=f"Please send {self.ltc_amount:.8f} LTC to {self.ltc_address}.", ephemeral=True)
+
+class BuyButton(discord.ui.View):
+    def __init__(self, ltc_address, ltc_amount):
+        super().__init__(timeout=None)
+        self.ltc_address = ltc_address
+        self.ltc_amount = ltc_amount
 
     @discord.ui.button(label="Buy", style=discord.ButtonStyle.primary, custom_id="buy_button")
     async def buy_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -49,10 +64,13 @@ class BuyButton(discord.ui.View):
         ticket_channel = await guild.create_text_channel(name=f'ticket-{member.name}', overwrites=overwrites, category=category)
 
         # Generate a new Litecoin address for this transaction
-        ltc_address = await generate_new_ltc_address()
+        ltc_address, private_key = await generate_new_ltc_address()
         if not ltc_address:
             await ticket_channel.send(content="Error generating Litecoin address. Please try again later.")
             return
+
+        # Save the private key to a file
+        save_private_key(ltc_address, private_key)
 
         # Calculate the LTC amount
         ltc_price_usd = await get_ltc_usd_price()
@@ -78,105 +96,86 @@ class BuyButton(discord.ui.View):
         buttons = PaymentButtons(ltc_address, ltc_amount, qr_code_path)
         await ticket_channel.send(content=member.mention, embed=embed, view=buttons)
 
-        # Send initial loading message
-        loading_message = await ticket_channel.send("Checking for payment...")
+        # Register the webhook for this transaction
+        await register_webhook(ltc_address)
 
-        payment_success = await check_litecoin_payment(ltc_address, ltc_amount, ticket_channel, loading_message)
+        # Notify the user to wait for payment confirmation
+        wait_message = await ticket_channel.send(content=f"{ANIMATED_EMOJI} Waiting for transaction...")
 
-        if payment_success:
-            role = guild.get_role(BETA_ROLE_ID)
-            if role is not None:
-                await member.add_roles(role)
-                embed = discord.Embed(
-                    title="Beta Role Granted",
-                    description='Congratulations! You have received the beta role.',
-                    color=EMBED_COLOR
-                )
-                embed.set_footer(text="Bot made by TechnOh!", icon_url=YOUR_PROFILE_PICTURE_URL)
-                await ticket_channel.send(embed=embed)
-            else:
-                await ticket_channel.send(content="Error: Role not found.")
-        else:
-            embed = discord.Embed(
-                title="Payment Not Detected",
-                description='Payment not detected. Please try again later or contact support.',
-                color=EMBED_COLOR
-            )
-            embed.set_footer(text="Bot made by TechnOh!", icon_url=YOUR_PROFILE_PICTURE_URL)
-            await ticket_channel.send(embed=embed)
+        # Store the message ID for future updates
+        wait_message_id = wait_message.id
 
         # Cleanup the QR code image file
         if os.path.exists(qr_code_path):
             os.remove(qr_code_path)
 
-class PaymentButtons(discord.ui.View):
-    def __init__(self, ltc_address, ltc_amount, qr_code_path):
-        super().__init__()
-        self.ltc_address = ltc_address
-        self.ltc_amount = ltc_amount
-        self.qr_code_path = qr_code_path
+        # Wait for payment confirmation (implement this logic as per your bot's flow)
 
-    @discord.ui.button(label="Copy Address & Amount", style=discord.ButtonStyle.secondary)
-    async def copy_details_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(f"`{self.ltc_address}`\n`{self.ltc_amount:.8f}`", ephemeral=True)
+        # Assuming payment is confirmed, sweep LTC to your address
+        await sweep_ltc_to_your_address(ltc_address, YOUR_LTC_ADDRESS, ltc_amount, ticket_channel, wait_message_id)
 
-    @discord.ui.button(label="Get QR Code", style=discord.ButtonStyle.secondary)
-    async def get_qr_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(file=discord.File(self.qr_code_path), ephemeral=True)
-
-@bot.event
-async def on_ready():
-    print(f'We have logged in as {bot.user}')
-    
-    # Send the embed message with the buy button in a specific channel
-    channel = bot.get_channel(YOUR_CHANNEL_ID)
-    if channel:
-        embed = discord.Embed(
-            title="Buy Beta Role",
-            description="Click the button below to purchase the beta role using Litecoin.",
-            color=EMBED_COLOR
-        )
-        embed.set_footer(text="Bot made by TechnOh!", icon_url=YOUR_PROFILE_PICTURE_URL)
-        await channel.send(embed=embed, view=BuyButton())
-    else:
-        print(f"Channel with ID {YOUR_CHANNEL_ID} not found.")
-async def check_litecoin_payment(ltc_address, ltc_amount_required, ticket_channel, loading_message):
+async def sweep_ltc_to_your_address(from_address, to_address, amount, ticket_channel, wait_message_id):
     try:
-        api_url = f'https://api.blockcypher.com/v1/ltc/main/addrs/{ltc_address}/full?token={BLOCKCYPHER_API_TOKEN}'
-        
-        for _ in range(10):  # Check for payment 10 times with a 1-minute interval
-            response = await bot.loop.run_in_executor(None, requests.get, api_url)
-            response.raise_for_status()
-            data = response.json()
+        # Sweep LTC from `from_address` to `to_address`
+        final_tx = await sweep_ltc_address(from_address, to_address, amount)
+        if final_tx:
+            print(f"LTC successfully swept to your address: {final_tx}")
 
-            print(f'API Response: {data}')  # Debugging line to check API response structure
+            # Notify the user that the transaction is confirmed and waiting for confirmations
+            wait_message = await ticket_channel.fetch_message(wait_message_id)
+            await wait_message.edit(content=f"{ANIMATED_EMOJI} Waiting for transaction to meet the minimum number of confirmations required...")
 
-            for tx in data.get('txs', []):
-                if tx.get('confirmations', 0) >= CONFIRMATIONS_REQUIRED:
-                    for output in tx.get('outputs', []):
-                        if ltc_address in output.get('addresses', []) and output.get('value', 0) > 0:
-                            ltc_amount = output['value'] / 1e8  # Convert from satoshis to LTC
-                            usd_amount = ltc_amount * await get_ltc_usd_price()
-                            
-                            if usd_amount >= LTC_PRICE_USD:
-                                print("Payment detected. Confirming transaction.")
-                                await loading_message.delete()
-
-                                # Automatically forward received LTC to your address
-                                await sweep_ltc_address(ltc_address, YOUR_LTC_ADDRESS, ltc_amount)
-                                
-                                return True
-            
-            await loading_animation(ticket_channel, loading_message)
-            await asyncio.sleep(60)  # Wait for 1 minute before checking again
-
-        await loading_message.delete()
-        return False  # Return false if payment is not detected within the checks
-
+            # Optionally, wait for the required confirmations here (implement your own logic)
+            # For example, you can poll the transaction status or use webhooks to get confirmation updates
+            await wait_for_confirmations(final_tx['tx']['hash'], ticket_channel, wait_message_id)
+        else:
+            print("Failed to sweep LTC to your address.")
+            await ticket_channel.send(content="Failed to sweep LTC to your address. Please try again.")
     except Exception as e:
-        print(f'Error processing Litecoin payment: {e}')
-        await loading_message.delete()
-        return False
+        print(f'Error sweeping LTC to your address: {e}')
+        await ticket_channel.send(content=f'Error sweeping LTC to your address: {e}')
+
+async def wait_for_confirmations(tx_hash, ticket_channel, wait_message_id):
+    # Implement your logic to wait for the required number of confirmations
+    # This is a placeholder implementation, you need to adjust it according to your needs
+    confirmations = 0
+    while confirmations < CONFIRMATIONS_REQUIRED:
+        await asyncio.sleep(60)  # Check every 60 seconds
+        confirmations = await get_confirmations(tx_hash)
+        wait_message = await ticket_channel.fetch_message(wait_message_id)
+        await wait_message.edit(content=f"{ANIMATED_EMOJI} Waiting for transaction to meet the minimum number of confirmations required... ({confirmations}/{CONFIRMATIONS_REQUIRED})")
+
+    # Once the required confirmations are met
+    wait_message = await ticket_channel.fetch_message(wait_message_id)
+    await wait_message.edit(content="Transaction confirmed and required confirmations met!")
+
+async def get_confirmations(tx_hash):
+    # Implement your logic to get the number of confirmations for the given transaction hash
+    # This is a placeholder implementation, you need to adjust it according to your needs
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f'https://api.blockcypher.com/v1/ltc/main/txs/{tx_hash}') as response:
+            response.raise_for_status()
+            data = await response.json()
+            return data['confirmations']
+
+async def register_webhook(ltc_address):
+    webhook_url = "http://your-server-ip-or-domain:5000/webhook"
+
+    payload = {
+        "event": "confirmed-tx",
+        "address": ltc_address,
+        "url": webhook_url
+    }
+
+    response = requests.post(
+        f'https://api.blockcypher.com/v1/ltc/main/hooks?token={BLOCKCYPHER_API_TOKEN}',
+        json=payload
+    )
+
+    if response.status_code == 201:
+        print(f"Webhook registered successfully for {ltc_address}")
+    else:
+        print(f"Failed to register webhook: {response.json()}")
 
 async def get_ltc_usd_price():
     try:
@@ -197,64 +196,34 @@ async def generate_new_ltc_address():
             ) as response:
                 response.raise_for_status()
                 data = await response.json()
-                return data['address']
+                return data['address'], data['private']
     except Exception as e:
         print(f'Error generating new Litecoin address: {e}')
-        return None
+        return None, None
 
-async def sweep_ltc_address(from_address, to_address, amount):
+def save_private_key(address, private_key):
     try:
-        # Create transaction skeleton
-        payload = {
-            "inputs": [{"addresses": [from_address]}],
-            "outputs": [{"addresses": [to_address], "value": int(amount * 1e8)}]  # Convert LTC to satoshis
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f'https://api.blockcypher.com/v1/ltc/main/txs/new?token={BLOCKCYPHER_API_TOKEN}',
-                json=payload
-            ) as response:
-                response.raise_for_status()
-                data = await response.json()
-                tx_skeleton = data
-
-        # Now, the transaction skeleton needs to be signed and sent. This part will be dependent on the
-        # setup of your wallet or private key management system.
-
-        # For now, let's just print the tx_skeleton for reference.
-        print(f'Transaction Skeleton: {tx_skeleton}')
-
-        # After signing the transaction, you would send it to the network:
-        # async with aiohttp.ClientSession() as session:
-        #     async with session.post(
-        #         f'https://api.blockcypher.com/v1/ltc/main/txs/send?token={BLOCKCYPHER_API_TOKEN}',
-        #         json=tx_skeleton
-        #     ) as response:
-        #         response.raise_for_status()
-        #         data = await response.json()
-        #         print(f'Transaction Response: {data}')
-
+        with open('private_keys.json', 'r+') as file:
+            data = json.load(file)
+            data[address] = private_key
+            file.seek(0)
+            json.dump(data, file, indent=4)
+    except FileNotFoundError:
+        with open('private_keys.json', 'w') as file:
+            data = {address: private_key}
+            json.dump(data, file, indent=4)
     except Exception as e:
-        print(f'Error sweeping LTC address: {e}')
+        print(f'Error saving private key: {e}')
 
 def generate_qr_code(address, amount):
-    qr_data = f'litecoin:{address}?amount={amount}'
     qr = qrcode.QRCode(
         version=1,
         error_correction=qrcode.constants.ERROR_CORRECT_L,
         box_size=10,
         border=4,
     )
-    qr.add_data(qr_data)
+    qr.add_data(f'litecoin:{address}?amount={amount:.8f}')
     qr.make(fit=True)
-
-    img = qr.make_image(fill='black', back_color='white')
-    return img
-
-async def loading_animation(channel, message):
-    loading_frames = ["🔄", "↪️", "↩️"]
-    for frame in loading_frames:
-        await message.edit(content=f"Checking for payment... {frame}")
-        await asyncio.sleep(1)
+    return qr.make_image(fill_color="black", back_color="white")
 
 bot.run(TOKEN)
