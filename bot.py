@@ -6,6 +6,10 @@ import qrcode
 import os
 from dotenv import load_dotenv
 import json
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
 
@@ -19,7 +23,7 @@ YOUR_PROFILE_PICTURE_URL = os.getenv('PROFILE_PICTURE_URL')
 YOUR_LTC_ADDRESS = os.getenv('YOUR_LTC_ADDRESS')
 PRIVATE_KEY = os.getenv('PRIVATE_KEY')
 
-LTC_PRICE_USD = 30.0
+LTC_PRICE_USD = 0.1
 CONFIRMATIONS_REQUIRED = 1
 EMBED_COLOR = 0x9904D0
 
@@ -61,6 +65,9 @@ class BuyButton(discord.ui.View):
             member: discord.PermissionOverwrite(read_messages=True)
         }
         category = guild.get_channel(TICKET_CATEGORY_ID)
+        if category is None:
+            logging.error("Ticket category not found!")
+            return
         ticket_channel = await guild.create_text_channel(name=f'ticket-{member.name}', overwrites=overwrites, category=category)
 
         # Generate a new Litecoin address for this transaction
@@ -119,7 +126,7 @@ async def sweep_ltc_to_your_address(from_address, to_address, amount, ticket_cha
         # Sweep LTC from `from_address` to `to_address`
         final_tx = await sweep_ltc_address(from_address, to_address, amount)
         if final_tx:
-            print(f"LTC successfully swept to your address: {final_tx}")
+            logging.info(f"LTC successfully swept to your address: {final_tx}")
 
             # Notify the user that the transaction is confirmed and waiting for confirmations
             wait_message = await ticket_channel.fetch_message(wait_message_id)
@@ -129,10 +136,10 @@ async def sweep_ltc_to_your_address(from_address, to_address, amount, ticket_cha
             # For example, you can poll the transaction status or use webhooks to get confirmation updates
             await wait_for_confirmations(final_tx['tx']['hash'], ticket_channel, wait_message_id)
         else:
-            print("Failed to sweep LTC to your address.")
+            logging.error("Failed to sweep LTC to your address.")
             await ticket_channel.send(content="Failed to sweep LTC to your address. Please try again.")
     except Exception as e:
-        print(f'Error sweeping LTC to your address: {e}')
+        logging.error(f'Error sweeping LTC to your address: {e}')
         await ticket_channel.send(content=f'Error sweeping LTC to your address: {e}')
 
 async def wait_for_confirmations(tx_hash, ticket_channel, wait_message_id):
@@ -159,7 +166,7 @@ async def get_confirmations(tx_hash):
             return data['confirmations']
 
 async def register_webhook(ltc_address):
-    webhook_url = "http://your-server-ip-or-domain:5000/webhook"
+    webhook_url = "http://45.133.74.37:5000/webhook"
 
     payload = {
         "event": "confirmed-tx",
@@ -173,9 +180,9 @@ async def register_webhook(ltc_address):
     )
 
     if response.status_code == 201:
-        print(f"Webhook registered successfully for {ltc_address}")
+        logging.info(f"Webhook registered successfully for {ltc_address}")
     else:
-        print(f"Failed to register webhook: {response.json()}")
+        logging.error(f"Failed to register webhook: {response.json()}")
 
 async def get_ltc_usd_price():
     try:
@@ -185,7 +192,7 @@ async def get_ltc_usd_price():
                 data = await response.json()
                 return data['litecoin']['usd']
     except Exception as e:
-        print(f'Error fetching Litecoin price: {e}')
+        logging.error(f'Error fetching Litecoin price: {e}')
         return 0
 
 async def generate_new_ltc_address():
@@ -198,7 +205,7 @@ async def generate_new_ltc_address():
                 data = await response.json()
                 return data['address'], data['private']
     except Exception as e:
-        print(f'Error generating new Litecoin address: {e}')
+        logging.error(f'Error generating new Litecoin address: {e}')
         return None, None
 
 def save_private_key(address, private_key):
@@ -213,7 +220,7 @@ def save_private_key(address, private_key):
             data = {address: private_key}
             json.dump(data, file, indent=4)
     except Exception as e:
-        print(f'Error saving private key: {e}')
+        logging.error(f'Error saving private key: {e}')
 
 def generate_qr_code(address, amount):
     qr = qrcode.QRCode(
@@ -225,5 +232,9 @@ def generate_qr_code(address, amount):
     qr.add_data(f'litecoin:{address}?amount={amount:.8f}')
     qr.make(fit=True)
     return qr.make_image(fill_color="black", back_color="white")
+
+@bot.event
+async def on_ready():
+    logging.info(f'Logged in as {bot.user}!')
 
 bot.run(TOKEN)
