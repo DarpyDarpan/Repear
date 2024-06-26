@@ -7,6 +7,7 @@ import os
 from dotenv import load_dotenv
 import json
 import logging
+import asyncio
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -36,11 +37,6 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 ANIMATED_EMOJI = '<a:animated_emoji:123456789012345678>'  # Replace with your actual emoji ID
 
 class BuyButton(discord.ui.View):
-    def __init__(self, ltc_address, ltc_amount):
-        super().__init__(timeout=None)
-        self.ltc_address = ltc_address
-        self.ltc_amount = ltc_amount
-
     @discord.ui.button(label="Buy", style=discord.ButtonStyle.primary, custom_id="buy_button")
     async def buy_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
@@ -108,9 +104,24 @@ class BuyButton(discord.ui.View):
         # Wait for payment confirmation (implement this logic as per your bot's flow)
 
         # Assuming payment is confirmed, sweep LTC to your address
-        await sweep_ltc_to_your_address(ltc_address, YOUR_LTC_ADDRESS, ltc_amount, ticket_channel, wait_message_id)
+        await sweep_ltc_to_your_address(ltc_address, YOUR_LTC_ADDRESS, ltc_amount, ticket_channel, wait_message_id, member)
 
-async def sweep_ltc_to_your_address(from_address, to_address, amount, ticket_channel, wait_message_id):
+class PaymentButtons(discord.ui.View):
+    def __init__(self, ltc_address, ltc_amount, qr_code_path):
+        super().__init__(timeout=None)
+        self.ltc_address = ltc_address
+        self.ltc_amount = ltc_amount
+        self.qr_code_path = qr_code_path
+
+    @discord.ui.button(label="Paste Payment Details", style=discord.ButtonStyle.primary, custom_id="paste_payment_details")
+    async def paste_payment_details(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(content=f'Litecoin Address: `{self.ltc_address}`\nLTC Amount: `{self.ltc_amount:.8f}`', ephemeral=True)
+
+    @discord.ui.button(label="Show QR Code", style=discord.ButtonStyle.secondary, custom_id="show_qr_code")
+    async def show_qr_code(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(file=discord.File(self.qr_code_path), ephemeral=True)
+
+async def sweep_ltc_to_your_address(from_address, to_address, amount, ticket_channel, wait_message_id, member):
     try:
         # Sweep LTC from `from_address` to `to_address`
         final_tx = await sweep_ltc_address(from_address, to_address, amount)
@@ -123,7 +134,7 @@ async def sweep_ltc_to_your_address(from_address, to_address, amount, ticket_cha
 
             # Optionally, wait for the required confirmations here (implement your own logic)
             # For example, you can poll the transaction status or use webhooks to get confirmation updates
-            await wait_for_confirmations(final_tx['tx']['hash'], ticket_channel, wait_message_id)
+            await wait_for_confirmations(final_tx['tx']['hash'], ticket_channel, wait_message_id, member)
         else:
             logging.error("Failed to sweep LTC to your address.")
             await ticket_channel.send(content="Failed to sweep LTC to your address. Please try again.")
@@ -131,7 +142,7 @@ async def sweep_ltc_to_your_address(from_address, to_address, amount, ticket_cha
         logging.error(f'Error sweeping LTC to your address: {e}')
         await ticket_channel.send(content=f'Error sweeping LTC to your address: {e}')
 
-async def wait_for_confirmations(tx_hash, ticket_channel, wait_message_id):
+async def wait_for_confirmations(tx_hash, ticket_channel, wait_message_id, member):
     # Implement your logic to wait for the required number of confirmations
     # This is a placeholder implementation, you need to adjust it according to your needs
     confirmations = 0
@@ -144,6 +155,20 @@ async def wait_for_confirmations(tx_hash, ticket_channel, wait_message_id):
     # Once the required confirmations are met
     wait_message = await ticket_channel.fetch_message(wait_message_id)
     await wait_message.edit(content="Transaction confirmed and required confirmations met!")
+
+    # Assign the role to the user
+    role = discord.utils.get(ticket_channel.guild.roles, id=BETA_ROLE_ID)
+    if role:
+        await member.add_roles(role)
+        logging.info(f"Assigned {role.name} role to {member.name}")
+
+        # Send an embed message to the ticket channel
+        embed = discord.Embed(
+            title="Role Assigned",
+            description=f"Congratulations {member.mention}, you have been given the **{role.name}** role!",
+            color=discord.Color.green()
+        )
+        await ticket_channel.send(embed=embed)
 
 async def get_confirmations(tx_hash):
     # Implement your logic to get the number of confirmations for the given transaction hash
@@ -198,18 +223,8 @@ async def generate_new_ltc_address():
         return None, None
 
 def save_private_key(address, private_key):
-    try:
-        with open('private_keys.json', 'r+') as file:
-            data = json.load(file)
-            data[address] = private_key
-            file.seek(0)
-            json.dump(data, file, indent=4)
-    except FileNotFoundError:
-        with open('private_keys.json', 'w') as file:
-            data = {address: private_key}
-            json.dump(data, file, indent=4)
-    except Exception as e:
-        logging.error(f'Error saving private key: {e}')
+    with open(f'{address}.key', 'w') as key_file:
+        key_file.write(private_key)
 
 def generate_qr_code(address, amount):
     qr = qrcode.QRCode(
@@ -218,52 +233,25 @@ def generate_qr_code(address, amount):
         box_size=10,
         border=4,
     )
-    qr.add_data(f'litecoin:{address}?amount={amount:.8f}')
+    qr.add_data(f'litecoin:{address}?amount={amount}')
     qr.make(fit=True)
-    return qr.make_image(fill_color="black", back_color="white")
-
-async def send_buy_message():
-    channel = bot.get_channel(YOUR_CHANNEL_ID)
-    if channel is None:
-        logging.error(f"Channel with ID {YOUR_CHANNEL_ID} not found!")
-        return
-    
-    ltc_address, private_key = await generate_new_ltc_address()
-    if not ltc_address:
-        await channel.send(content="Error generating Litecoin address. Please try again later.")
-        return
-
-    save_private_key(ltc_address, private_key)
-
-    ltc_price_usd = await get_ltc_usd_price()
-    if ltc_price_usd == 0:
-        await channel.send(content="Error fetching Litecoin price. Please try again later.")
-        return
-
-    ltc_amount = LTC_PRICE_USD / ltc_price_usd
-    qr_code_image = generate_qr_code(ltc_address, ltc_amount)
-    qr_code_path = 'ltc_qr.png'
-    qr_code_image.save(qr_code_path)
-
-    embed = discord.Embed(
-        title="Purchase Beta Role",
-        description="To purchase the beta role, please send the required amount in Litecoin to the provided address. Use the buttons below for easy access.",
-        color=EMBED_COLOR
-    )
-    embed.add_field(name="Litecoin Address", value=f'`{ltc_address}`', inline=False)
-    embed.add_field(name="LTC Amount", value=f'`{ltc_amount:.8f}`', inline=False)
-    embed.add_field(name="USD Amount", value=f'`${LTC_PRICE_USD:.2f}`', inline=False)
-    embed.set_footer(text="Bot made by TechnOh!", icon_url=YOUR_PROFILE_PICTURE_URL)
-    
-    buttons = BuyButton(ltc_address, ltc_amount)
-    await channel.send(embed=embed, view=buttons)
-
-    if os.path.exists(qr_code_path):
-        os.remove(qr_code_path)
+    img = qr.make_image(fill='black', back_color='white')
+    return img
 
 @bot.event
 async def on_ready():
-    logging.info(f'Logged in as {bot.user}!')
-    await send_buy_message()
+    channel = bot.get_channel(YOUR_CHANNEL_ID)
+    if channel:
+        embed = discord.Embed(
+            title="Welcome to the Beta Role Purchase Bot",
+            description="Click the button below to start the purchase process for the Beta role.",
+            color=EMBED_COLOR
+        )
+        embed.set_footer(text="Bot made by TechnOh!", icon_url=YOUR_PROFILE_PICTURE_URL)
+        
+        view = BuyButton()
+        await channel.send(embed=embed, view=view)
+    logging.info(f'Bot connected as {bot.user}')
 
+# Add this to the end of your script to start the bot
 bot.run(TOKEN)
