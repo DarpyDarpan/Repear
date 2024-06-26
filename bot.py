@@ -74,7 +74,7 @@ class BuyButton(discord.ui.View):
 
         ltc_amount = LTC_PRICE_USD / ltc_price_usd
         qr_code_image = generate_qr_code(ltc_address, ltc_amount)
-        qr_code_path = 'ltc_qr.png'
+        qr_code_path = f'{ltc_address}.png'  # Save QR code with a unique name
         qr_code_image.save(qr_code_path)
 
         embed = discord.Embed(
@@ -92,10 +92,6 @@ class BuyButton(discord.ui.View):
 
         # Register the webhook for this transaction
         await register_webhook(ltc_address, ticket_channel.id, member.id)
-
-        # Cleanup the QR code image file
-        if os.path.exists(qr_code_path):
-            os.remove(qr_code_path)
 
 class PaymentButtons(discord.ui.View):
     def __init__(self, ltc_address, ltc_amount, qr_code_path):
@@ -192,49 +188,44 @@ async def register_webhook(ltc_address, channel_id, user_id):
     else:
         logging.error(f"Failed to register webhook for {ltc_address}: {response.status_code}, {response.text}")
 
+def save_private_key(ltc_address, private_key):
+    with open(f'{ltc_address}_private_key.txt', 'w') as f:
+        f.write(private_key)
+
 async def generate_new_ltc_address():
-    url = f"https://api.blockcypher.com/v1/ltc/main/addrs?token={BLOCKCYPHER_API_TOKEN}"
     async with aiohttp.ClientSession() as session:
-        async with session.post(url) as response:
+        async with session.post(
+            f'https://api.blockcypher.com/v1/ltc/main/addrs?token={BLOCKCYPHER_API_TOKEN}'
+        ) as response:
             if response.status != 201:
-                logging.error(f"Error generating new LTC address: {response.status}")
+                logging.error(f"Failed to generate new Litecoin address: {response.status}, {await response.text()}")
                 return None, None
             data = await response.json()
             return data['address'], data['private']
 
-def save_private_key(address, private_key):
-    with open(f'{address}.txt', 'w') as f:
-        f.write(private_key)
-
-def generate_qr_code(address, amount):
-    qr = qrcode.QRCode(
-        version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_L,
-        box_size=10,
-        border=4,
-    )
-    qr.add_data(f'ltc:{address}?amount={amount:.8f}')
-    qr.make(fit=True)
-    return qr.make_image(fill_color="black", back_color="white")
-
 async def get_ltc_usd_price():
-    url = "https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
+        async with session.get('https://api.coinbase.com/v2/prices/LTC-USD/spot') as response:
             if response.status != 200:
-                logging.error(f"Error fetching LTC price: {response.status}")
+                logging.error(f"Failed to fetch Litecoin price: {response.status}, {await response.text()}")
                 return 0
             data = await response.json()
-            return data['litecoin']['usd']
+            return float(data['data']['amount'])
+
+def generate_qr_code(address, amount):
+    qr = qrcode.make(f'ltc:{address}?amount={amount:.8f}')
+    return qr
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} has connected to Discord!')
-    bot.add_view(BuyButton())
-
-@bot.command()
-async def test(ctx):
-    view = BuyButton()
-    await ctx.send("Press the button to buy the beta role.", view=view)
+    logging.info(f'Logged in as {bot.user.name} ({bot.user.id})')
+    channel = bot.get_channel(YOUR_CHANNEL_ID)
+    if channel:
+        embed = discord.Embed(
+            title="Buy Beta Role",
+            description="Click the button below to purchase the beta role.",
+            color=EMBED_COLOR
+        )
+        await channel.send(embed=embed, view=BuyButton())
 
 bot.run(TOKEN)
