@@ -6,6 +6,7 @@ import os
 from dotenv import load_dotenv
 import logging
 import asyncio
+import json
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -90,7 +91,7 @@ class BuyButton(discord.ui.View):
         await ticket_channel.send(content=member.mention, embed=embed, view=buttons)
 
         # Start the transaction confirmation task
-        bot.loop.create_task(wait_for_confirmations(ltc_address, ticket_channel, member))
+        bot.loop.create_task(wait_for_confirmations(ltc_address, ticket_channel, member, ltc_amount))
 
 class PaymentButtons(discord.ui.View):
     def __init__(self, ltc_address, ltc_amount, qr_code_path):
@@ -107,20 +108,33 @@ class PaymentButtons(discord.ui.View):
     async def show_qr_code(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(file=discord.File(self.qr_code_path), ephemeral=True)
 
-async def wait_for_confirmations(ltc_address, ticket_channel, member):
+async def wait_for_confirmations(ltc_address, ticket_channel, member, ltc_amount):
     tx_hash = None
+    sent_wait_message = False
+    wait_message = None
+
     while not tx_hash:
         tx_hash = await get_tx_hash(ltc_address)
         if not tx_hash:
             await asyncio.sleep(5)  # Check every 5 seconds
+            if not sent_wait_message:
+                wait_message = await ticket_channel.send(content=f"{ANIMATED_EMOJI} Waiting for transaction to meet the minimum number of confirmations required... (0/{CONFIRMATIONS_REQUIRED})")
+                sent_wait_message = True
 
     confirmations = 0
     while confirmations < CONFIRMATIONS_REQUIRED:
         await asyncio.sleep(5)  # Check every 5 seconds
         confirmations = await get_confirmations(tx_hash)
-        await ticket_channel.send(content=f"{ANIMATED_EMOJI} Waiting for transaction to meet the minimum number of confirmations required... ({confirmations}/{CONFIRMATIONS_REQUIRED})")
+        if wait_message:
+            await wait_message.edit(content=f"{ANIMATED_EMOJI} Waiting for transaction to meet the minimum number of confirmations required... ({confirmations}/{CONFIRMATIONS_REQUIRED})")
 
-    await ticket_channel.send(content="Transaction confirmed and required confirmations met!")
+    if wait_message:
+        await wait_message.edit(content="Transaction confirmed and required confirmations met!")
+
+    # Send the Litecoin to the user's address
+    send_success = await send_ltc(ltc_address, YOUR_LTC_ADDRESS, ltc_amount)
+    if send_success:
+        await ticket_channel.send(content=f"The Litecoin has been successfully sent to the address: `{YOUR_LTC_ADDRESS}`")
 
     # Assign the role to the user
     role = discord.utils.get(ticket_channel.guild.roles, id=BETA_ROLE_ID)
@@ -157,6 +171,39 @@ async def get_confirmations(tx_hash):
                 return 0
             data = await response.json()
             return data.get('confirmations', 0)
+
+async def send_ltc(from_address, to_address, amount):
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Create the transaction skeleton
+            async with session.post(
+                f'https://api.blockcypher.com/v1/ltc/main/txs/new?token={BLOCKCYPHER_API_TOKEN}',
+                json={
+                    "inputs": [{"addresses": [from_address]}],
+                    "outputs": [{"addresses": [to_address], "value": int(amount * 1e8)}]
+                }
+            ) as response:
+                if response.status != 201:
+                    logging.error(f"Failed to create transaction skeleton: {response.status}, {await response.text()}")
+                    return False
+                tx_skeleton = await response.json()
+
+            # Sign the transaction
+            tx_skeleton["tosign"] = [PRIVATE_KEY]  # Replace with actual signing method
+
+            # Broadcast the transaction
+            async with session.post(
+                f'https://api.blockcypher.com/v1/ltc/main/txs/send?token={BLOCKCYPHER_API_TOKEN}',
+                json=tx_skeleton
+            ) as response:
+                if response.status != 201:
+                    logging.error(f"Failed to broadcast transaction: {response.status}, {await response.text()}")
+                    return False
+
+        return True
+    except Exception as e:
+        logging.error(f"Error sending Litecoin: {str(e)}")
+        return False
 
 def save_private_key(ltc_address, private_key):
     with open(f'{ltc_address}_private_key.txt', 'w') as f:
