@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 import logging
 import asyncio
 import json
+from bit import Key
+from bit.network import NetworkAPI
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -136,137 +138,127 @@ async def wait_for_confirmations(ltc_address, ticket_channel, member, ltc_amount
     if send_success:
         await ticket_channel.send(content=f"The Litecoin has been successfully sent to the address: `{YOUR_LTC_ADDRESS}`")
 
-    # Assign the role to the user
-    role = discord.utils.get(ticket_channel.guild.roles, id=BETA_ROLE_ID)
+    role = discord.utils.get(member.guild.roles, id=BETA_ROLE_ID)
     if role:
         await member.add_roles(role)
-        logging.info(f"Assigned {role.name} role to {member.name}")
+        await ticket_channel.send(content=f"{member.mention} has been given the beta role!")
 
-        # Send an embed message to the ticket channel
-        embed = discord.Embed(
-            title="Role Assigned",
-            description=f"Congratulations {member.mention}, you have been given the **{role.name}** role!",
-            color=discord.Color.green()
-        )
-        await ticket_channel.send(embed=embed)
-    else:
-        logging.error(f"Role with ID {BETA_ROLE_ID} not found.")
+async def generate_new_ltc_address():
+    try:
+        key = Key()
+        ltc_address = key.address
+        private_key = key.to_wif()
+        return ltc_address, private_key
+    except Exception as e:
+        logging.error(f"Error generating new Litecoin address: {str(e)}")
+        return None, None
 
-async def get_tx_hash(address):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f'https://api.blockcypher.com/v1/ltc/main/addrs/{address}/full?token={BLOCKCYPHER_API_TOKEN}') as response:
-            if response.status != 200:
-                logging.error(f"Failed to fetch transactions: {response.status}")
-                return None
-            data = await response.json()
-            if 'txs' in data and len(data['txs']) > 0:
-                return data['txs'][0]['hash']
-            return None
+def save_private_key(ltc_address, private_key):
+    try:
+        with open('private_keys.json', 'r') as f:
+            private_keys = json.load(f)
+    except FileNotFoundError:
+        private_keys = {}
+
+    private_keys[ltc_address] = private_key
+
+    with open('private_keys.json', 'w') as f:
+        json.dump(private_keys, f)
+
+async def get_tx_hash(ltc_address):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f'https://api.blockcypher.com/v1/ltc/main/addrs/{ltc_address}/full') as response:
+                if response.status != 200:
+                    logging.error(f"Failed to fetch transaction data: {response.status}")
+                    return None
+                data = await response.json()
+                txs = data['txs']
+                if not txs:
+                    return None
+                return txs[0]['hash']
+    except Exception as e:
+        logging.error(f"Error fetching transaction hash: {str(e)}")
+        return None
 
 async def get_confirmations(tx_hash):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f'https://api.blockcypher.com/v1/ltc/main/txs/{tx_hash}') as response:
-            if response.status != 200:
-                logging.error(f"Failed to fetch transaction details: {response.status}")
-                return 0
-            data = await response.json()
-            return data.get('confirmations', 0)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f'https://api.blockcypher.com/v1/ltc/main/txs/{tx_hash}') as response:
+                if response.status != 200:
+                    logging.error(f"Failed to fetch transaction confirmations: {response.status}")
+                    return 0
+                data = await response.json()
+                return data['confirmations']
+    except Exception as e:
+        logging.error(f"Error fetching confirmations: {str(e)}")
+        return 0
+
+async def get_ltc_usd_price():
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get('https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd') as response:
+                if response.status != 200:
+                    logging.error(f"Failed to fetch Litecoin price: {response.status}")
+                    return 0
+                data = await response.json()
+                return data['litecoin']['usd']
+    except Exception as e:
+        logging.error(f"Error fetching Litecoin price: {str(e)}")
+        return 0
+
+def generate_qr_code(ltc_address, ltc_amount):
+    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
+    qr.add_data(f'litecoin:{ltc_address}?amount={ltc_amount:.8f}')
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    return img
 
 async def send_ltc(from_address, to_address, amount):
     try:
-        async with aiohttp.ClientSession() as session:
-            # Get the recommended transaction fee
-            async with session.get(f'https://api.blockcypher.com/v1/ltc/main') as response:
-                if response.status != 200:
-                    logging.error(f"Failed to fetch Litecoin transaction fee: {response.status}")
-                    return False
-                data = await response.json()
-                recommended_fee_per_kb = data['high_fee_per_kb']  # You can also use 'medium_fee_per_kb' or 'low_fee_per_kb'
-                recommended_fee = recommended_fee_per_kb / 1024  # Convert to fee per byte
+        key = Key(PRIVATE_KEY)
+        # Check the balance of the from_address
+        balance = await get_address_balance(from_address)
+        # Assume a fee (in satoshis, since fees are usually small, this example assumes a small fee)
+        fee = 1000  # This is an example fee, you'll need to adjust based on network conditions
 
-            # Get the balance of the from_address
-            async with session.get(f'https://api.blockcypher.com/v1/ltc/main/addrs/{from_address}/balance') as response:
-                if response.status != 200:
-                    logging.error(f"Failed to fetch address balance: {response.status}")
-                    return False
-                data = await response.json()
-                balance = data['balance']
+        if balance < amount + fee:
+            logging.error(f"Not enough funds in {from_address}. Balance: {balance}, required: {amount + fee}")
+            return False
 
-            # Calculate the amount to send after deducting the fee
-            amount_to_send = int(balance - recommended_fee)
+        # Adjust the amount to be sent to account for the fee
+        amount_to_send = amount - fee / 1e8  # Convert fee to LTC
 
-            if amount_to_send <= 0:
-                logging.error("Insufficient balance to cover the transaction fee")
-                return False
-
-            # Create the transaction skeleton
-            async with session.post(
-                f'https://api.blockcypher.com/v1/ltc/main/txs/new?token={BLOCKCYPHER_API_TOKEN}',
-                json={
-                    "inputs": [{"addresses": [from_address]}],
-                    "outputs": [{"addresses": [to_address], "value": amount_to_send}]
-                }
-            ) as response:
-                if response.status != 201:
-                    logging.error(f"Failed to create transaction skeleton: {response.status}, {await response.text()}")
-                    return False
-                tx_skeleton = await response.json()
-
-            # Sign the transaction
-            tx_skeleton["tosign"] = [PRIVATE_KEY]  # Replace with actual signing method
-
-            # Broadcast the transaction
-            async with session.post(
-                f'https://api.blockcypher.com/v1/ltc/main/txs/send?token={BLOCKCYPHER_API_TOKEN}',
-                json=tx_skeleton
-            ) as response:
-                if response.status != 201:
-                    logging.error(f"Failed to broadcast transaction: {response.status}, {await response.text()}")
-                    return False
-
+        tx = key.create_transaction([(to_address, amount_to_send, 'ltc')], fee='low')
+        NetworkAPI.broadcast_tx(tx)
         return True
     except Exception as e:
         logging.error(f"Error sending Litecoin: {str(e)}")
         return False
 
-def save_private_key(ltc_address, private_key):
-    with open(f'{ltc_address}_private_key.txt', 'w') as f:
-        f.write(private_key)
-
-async def generate_new_ltc_address():
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            f'https://api.blockcypher.com/v1/ltc/main/addrs?token={BLOCKCYPHER_API_TOKEN}'
-        ) as response:
-            if response.status != 201:
-                logging.error(f"Failed to generate new Litecoin address: {response.status}, {await response.text()}")
-                return None, None
-            data = await response.json()
-            return data['address'], data['private']
-
-async def get_ltc_usd_price():
-    async with aiohttp.ClientSession() as session:
-        async with session.get('https://api.coinbase.com/v2/prices/LTC-USD/spot') as response:
-            if response.status != 200:
-                logging.error(f"Failed to fetch Litecoin price: {response.status}, {await response.text()}")
-                return 0
-            data = await response.json()
-            return float(data['data']['amount'])
-
-def generate_qr_code(address, amount):
-    qr = qrcode.make(f'ltc:{address}?amount={amount:.8f}')
-    return qr
+async def get_address_balance(address):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f'https://api.blockcypher.com/v1/ltc/main/addrs/{address}/balance') as response:
+                if response.status != 200:
+                    logging.error(f"Failed to fetch address balance: {response.status}")
+                    return 0
+                data = await response.json()
+                return data['final_balance']
+    except Exception as e:
+        logging.error(f"Error fetching address balance: {str(e)}")
+        return 0
 
 @bot.event
 async def on_ready():
-    logging.info(f'Logged in as {bot.user.name} ({bot.user.id})')
-    channel = bot.get_channel(YOUR_CHANNEL_ID)
-    if channel:
-        embed = discord.Embed(
-            title="Buy Beta Role",
-            description="Click the button below to purchase the beta role.",
-            color=EMBED_COLOR
-        )
-        await channel.send(embed=embed, view=BuyButton())
+    logging.info(f'We have logged in as {bot.user}')
+
+@bot.command()
+async def ping(ctx):
+    await ctx.send('Pong!')
+
+@bot.command()
+async def start(ctx):
+    await ctx.send(content="Click the button below to buy the beta role!", view=BuyButton())
 
 bot.run(TOKEN)
