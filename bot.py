@@ -175,12 +175,36 @@ async def get_confirmations(tx_hash):
 async def send_ltc(from_address, to_address, amount):
     try:
         async with aiohttp.ClientSession() as session:
+            # Get the recommended transaction fee
+            async with session.get(f'https://api.blockcypher.com/v1/ltc/main') as response:
+                if response.status != 200:
+                    logging.error(f"Failed to fetch Litecoin transaction fee: {response.status}")
+                    return False
+                data = await response.json()
+                recommended_fee_per_kb = data['high_fee_per_kb']  # You can also use 'medium_fee_per_kb' or 'low_fee_per_kb'
+                recommended_fee = recommended_fee_per_kb / 1024  # Convert to fee per byte
+
+            # Get the balance of the from_address
+            async with session.get(f'https://api.blockcypher.com/v1/ltc/main/addrs/{from_address}/balance') as response:
+                if response.status != 200:
+                    logging.error(f"Failed to fetch address balance: {response.status}")
+                    return False
+                data = await response.json()
+                balance = data['balance']
+
+            # Calculate the amount to send after deducting the fee
+            amount_to_send = int(balance - recommended_fee)
+
+            if amount_to_send <= 0:
+                logging.error("Insufficient balance to cover the transaction fee")
+                return False
+
             # Create the transaction skeleton
             async with session.post(
                 f'https://api.blockcypher.com/v1/ltc/main/txs/new?token={BLOCKCYPHER_API_TOKEN}',
                 json={
                     "inputs": [{"addresses": [from_address]}],
-                    "outputs": [{"addresses": [to_address], "value": int(amount * 1e8)}]
+                    "outputs": [{"addresses": [to_address], "value": amount_to_send}]
                 }
             ) as response:
                 if response.status != 201:
