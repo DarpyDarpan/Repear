@@ -7,8 +7,8 @@ from dotenv import load_dotenv
 import logging
 import asyncio
 import json
-from bit import Key
-from bit.network import NetworkAPI
+from litecoinutils.keys import P2pkhAddress, PrivateKey
+from litecoinutils.setup import setup
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -145,9 +145,11 @@ async def wait_for_confirmations(ltc_address, ticket_channel, member, ltc_amount
 
 async def generate_new_ltc_address():
     try:
-        key = Key()
-        ltc_address = key.address
-        private_key = key.to_wif()
+        setup('mainnet')
+        priv_key = PrivateKey()
+        address = priv_key.get_public_key().get_address()
+        ltc_address = address.to_string()
+        private_key = priv_key.to_wif()
         return ltc_address, private_key
     except Exception as e:
         logging.error(f"Error generating new Litecoin address: {str(e)}")
@@ -216,7 +218,7 @@ def generate_qr_code(ltc_address, ltc_amount):
 
 async def send_ltc(from_address, to_address, amount):
     try:
-        key = Key(PRIVATE_KEY)
+        key = PrivateKey(PRIVATE_KEY)
         # Check the balance of the from_address
         balance = await get_address_balance(from_address)
         # Assume a fee (in satoshis, since fees are usually small, this example assumes a small fee)
